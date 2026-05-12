@@ -1,0 +1,37 @@
+{
+  "name": "vsisearch",
+  "displayName": "VSI Search (IDEA Style)",
+  "description": "IntelliJ IDEA style Find in Files / Replace in Files – three-pane layout, flat results, full-file preview, floating window.",
+  "version": "0.1.0",
+  "publisher": "wilkey",
+  "author": { "name": "Wilkey", "email": "admin@wilkey.vip" },
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/jingtingzhiwu/vsisearch.git" },
+  "bugs": { "url": "https://github.com/jingtingzhiwu/vsisearch/issues" },
+  "homepage": "https://github.com/jingtingzhiwu/vsisearch#readme",
+  "keywords": ["search", "find", "replace", "idea", "intellij", "find in files", "replace in files"],
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "vsisearch.findInFiles",    "title": "VSI: Find in Files"    },
+      { "command": "vsisearch.replaceInFiles", "title": "VSI: Replace in Files" }
+    ],
+    "keybindings": [
+      { "command": "vsisearch.findInFiles",    "key": "ctrl+h",       "mac": "cmd+h",       "when": "editorTextFocus || !inputFocus" },
+      { "command": "vsisearch.replaceInFiles", "key": "ctrl+shift+h", "mac": "cmd+shift+h", "when": "editorTextFocus || !inputFocus" }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch":   "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node":   "^20.0.0",
+    "typescript":    "^5.3.0"
+  }
+}
