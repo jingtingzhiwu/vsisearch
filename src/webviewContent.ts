@@ -446,7 +446,10 @@ function renderFullFile(content, r) {
   // scroll target into center
   const targetEl = pvContent.querySelector('.pv-line.target');
   if (targetEl) {
-    const offset = targetEl.offsetTop - pvContent.clientHeight / 2 + targetEl.offsetHeight / 2;
+    const containerRect = pvContent.getBoundingClientRect();
+    const targetRect = targetEl.getBoundingClientRect();
+    const offset = targetRect.top - containerRect.top + pvContent.scrollTop
+                 - containerRect.height / 2 + targetRect.height / 2;
     pvContent.scrollTop = Math.max(0, offset);
   }
 }
