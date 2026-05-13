@@ -223,6 +223,8 @@ let useRegex    = false;
 let results     = [];      // flat array of MatchResult
 let activeIdx   = -1;
 let debounce    = null;
+let searching   = false;
+let streamFiles = 0;       // distinct files seen so far in streaming
 
 const qSearch   = document.getElementById('q-search');
 const qReplace  = document.getElementById('q-replace');
@@ -308,6 +310,43 @@ function doReplace(filePaths) {
   vscode.postMessage({ type: 'replace', opts, replaceText: qReplace.value, filePaths });
 }
 
+function buildRow(r, idx) {
+  const row = document.createElement('div');
+  row.className = 'result-row';
+  row.dataset.idx = idx;
+  if (isReplace) {
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.className = 'rr-check fcb';
+    cb.dataset.fp = r.filePath; cb.checked = true;
+    cb.addEventListener('click', e => e.stopPropagation());
+    row.appendChild(cb);
+  }
+  const codeSpan = document.createElement('span');
+  codeSpan.className = 'rr-code';
+  codeSpan.innerHTML = hlSnippet(r.text, r.col, r.colEnd);
+  row.appendChild(codeSpan);
+  const fileSpan = document.createElement('span');
+  fileSpan.className = 'rr-file';
+  fileSpan.title = r.relPath;
+  fileSpan.textContent = r.relPath;
+  row.appendChild(fileSpan);
+  const lnumSpan = document.createElement('span');
+  lnumSpan.className = 'rr-lnum';
+  lnumSpan.textContent = r.line;
+  row.appendChild(lnumSpan);
+  row.addEventListener('click', () => activateRow(idx));
+  row.addEventListener('dblclick', () => openRow(idx));
+  return row;
+}
+
+function updateStat() {
+  const total = results.length;
+  if (total === 0) { statEl.textContent = 'Ready'; return; }
+  statEl.innerHTML = '<span class="stat-count">' + total + '</span> match' + (total===1?'':'es')
+    + ' in <span class="stat-count">' + streamFiles + '</span> file' + (streamFiles===1?'':'s')
+    + (searching ? ' …' : '');
+}
+
 function renderResults(data) {
   results  = data;
   activeIdx = -1;
@@ -321,53 +360,11 @@ function renderResults(data) {
 
   emptyDiv.style.display  = 'none';
   spinner.classList.remove('on');
+  streamFiles = new Set(data.map(r => r.filePath)).size;
+  updateStat();
 
-  // Count distinct files
-  const files = new Set(data.map(r => r.filePath));
-  const total = data.length;
-  statEl.innerHTML = '<span class="stat-count">' + total + '</span> match' + (total===1?'':'es')
-    + ' in <span class="stat-count">' + files.size + '</span> file' + (files.size===1?'':'s');
-
-  // Build rows
   const frag = document.createDocumentFragment();
-  let lastFile = null;
-
-  data.forEach((r, idx) => {
-    const row = document.createElement('div');
-    row.className = 'result-row';
-    row.dataset.idx = idx;
-
-    // checkbox (replace mode)
-    if (isReplace) {
-      const cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.className = 'rr-check fcb';
-      cb.dataset.fp = r.filePath; cb.checked = true;
-      cb.addEventListener('click', e => e.stopPropagation());
-      row.appendChild(cb);
-    }
-
-    // file:line  (show file only when it changes)
-    const codeSpan = document.createElement('span');
-    codeSpan.className = 'rr-code';
-    codeSpan.innerHTML = hlSnippet(r.text, r.col, r.colEnd);
-    row.appendChild(codeSpan);
-
-    const fileSpan = document.createElement('span');
-    fileSpan.className = 'rr-file';
-    fileSpan.title = r.relPath;
-    fileSpan.textContent = r.relPath;
-    row.appendChild(fileSpan);
-
-    const lnumSpan = document.createElement('span');
-    lnumSpan.className = 'rr-lnum';
-    lnumSpan.textContent = r.line;
-    row.appendChild(lnumSpan);
-
-    row.addEventListener('click', () => activateRow(idx));
-    row.addEventListener('dblclick', () => openRow(idx));
-    frag.appendChild(row);
-  });
-
+  data.forEach((r, idx) => frag.appendChild(buildRow(r, idx)));
   resultList.appendChild(frag);
   if (isReplace) {
     replBar.classList.add('vis');
@@ -513,12 +510,54 @@ window.addEventListener('message', e => {
   const msg = e.data;
   switch(msg.type) {
     case 'searching':
+      searching = true;
+      results = [];
+      activeIdx = -1;
+      streamFiles = 0;
+      resultList.innerHTML = '';
       spinner.classList.add('on');
       emptyDiv.style.display = 'none';
-      resultList.innerHTML = '';
       replBar.classList.remove('vis');
       statEl.textContent = 'Searching\\u2026';
       break;
+
+    case 'resultsBatch': {
+      searching = true;
+      spinner.classList.remove('on');
+      emptyDiv.style.display = 'none';
+      const batch = msg.results;
+      if (!batch || !batch.length) break;
+      const startIdx = results.length;
+      for (let i = 0; i < batch.length; i++) {
+        const r = batch[i];
+        if (r.relPath !== (results.length > 0 ? results[results.length - 1].relPath : undefined)) {
+          streamFiles++;
+        }
+        results.push(r);
+        resultList.appendChild(buildRow(r, startIdx + i));
+      }
+      updateStat();
+      break;
+    }
+
+    case 'searchDone':
+      searching = false;
+      spinner.classList.remove('on');
+      if (msg.error) {
+        if (results.length === 0) showEmpty('Error: ' + msg.error);
+        else { updateStat(); }
+      } else if (results.length === 0) {
+        showEmpty('No results found for: ' + qSearch.value);
+      } else {
+        updateStat();
+      }
+      if (isReplace && results.length) {
+        replBar.classList.add('vis');
+        const tg = document.getElementById('btn-toggle-all');
+        if (tg) tg.textContent = 'Unselect All';
+      }
+      break;
+
     case 'results':
       if (msg.error) { showEmpty('Error: ' + msg.error); }
       else { renderResults(msg.results); }

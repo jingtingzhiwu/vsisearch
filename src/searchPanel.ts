@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
 import * as fs from 'fs';
-import { runSearchWorker, SearchOpts, MatchResult } from './searchEngine';
+import { runSearchRg, runSearchCollect, SearchOpts, MatchResult } from './searchEngine';
 import { getWebviewContent } from './webviewContent';
 
 interface MsgSearch   { type: 'search';  opts: Omit<SearchOpts,'root'|'filePaths'>; }
@@ -14,11 +13,13 @@ interface MsgClose    { type: 'close'; }
 
 type WebviewMsg = MsgSearch | MsgReplace | MsgPreview | MsgOpen | MsgLoadFile | MsgReady | MsgClose;
 
+const BATCH_INTERVAL = 50; // ms between streaming batches
+
 export class SearchPanel {
   private static _panel: vscode.WebviewPanel | undefined;
   private static _ctx: vscode.ExtensionContext;
   private static _disposables: vscode.Disposable[] = [];
-  private static _currentSearch: AbortController | undefined;
+  private static _currentSearch: { abort: () => void } | undefined;
   private static _deco: vscode.TextEditorDecorationType | undefined;
   private static _decoTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -72,6 +73,7 @@ export class SearchPanel {
       SearchPanel._disposables.forEach(d => d.dispose());
       SearchPanel._disposables = [];
       SearchPanel._deco?.dispose();
+      SearchPanel._currentSearch?.abort();
     }, null, SearchPanel._disposables);
   }
 
@@ -113,34 +115,44 @@ export class SearchPanel {
       return;
     }
 
+    // Abort previous search
     SearchPanel._currentSearch?.abort();
-    const ctl = new AbortController();
-    SearchPanel._currentSearch = ctl;
-
     SearchPanel._send({ type: 'searching' });
 
-    try {
-      const root    = roots[0].uri.fsPath;
-      const include = partialOpts.includeGlob || '**/*';
-      const excParts = ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/out/**'];
-      if (partialOpts.excludeGlob) { excParts.unshift(partialOpts.excludeGlob); }
-      const exclude = '{' + excParts.join(',') + '}';
+    const root = roots[0].uri.fsPath;
+    const opts: SearchOpts = { ...partialOpts };
 
-      const uris = await vscode.workspace.findFiles(include, exclude, 20000);
-      if (ctl.signal.aborted) { return; }
+    // Streaming: batch results and send periodically
+    const batch: MatchResult[] = [];
+    let batchTimer: ReturnType<typeof setTimeout> | undefined;
+    let fileCount = 0;
+    let lastRelPath: string | undefined;
 
-      const filePaths = uris.map(u => u.fsPath);
-      const opts: SearchOpts = { ...partialOpts, root, filePaths };
+    const flush = () => {
+      if (batch.length === 0) return;
+      const toSend = batch.splice(0);
+      SearchPanel._send({ type: 'resultsBatch', results: toSend, totalFiles: fileCount });
+    };
 
-      const results = await runSearchWorker(opts);
-      if (ctl.signal.aborted) { return; }
+    const handle = runSearchRg(opts, root,
+      (r: MatchResult) => {
+        if (r.relPath !== lastRelPath) {
+          fileCount++;
+          lastRelPath = r.relPath;
+        }
+        batch.push(r);
+        if (!batchTimer) {
+          batchTimer = setTimeout(() => { flush(); batchTimer = undefined; }, BATCH_INTERVAL);
+        }
+      },
+      (error?: string) => {
+        if (batchTimer) { clearTimeout(batchTimer); batchTimer = undefined; }
+        flush();
+        SearchPanel._send({ type: 'searchDone', error });
+      },
+    );
 
-      SearchPanel._send({ type: 'results', results, query: partialOpts.query });
-    } catch (e: unknown) {
-      if (!ctl.signal.aborted) {
-        SearchPanel._send({ type: 'results', results: [], error: String(e) });
-      }
-    }
+    SearchPanel._currentSearch = handle;
   }
 
   private static async _runReplace(
@@ -151,21 +163,13 @@ export class SearchPanel {
     const roots = vscode.workspace.workspaceFolders;
     if (!roots?.length) { return; }
 
-    const root    = roots[0].uri.fsPath;
-    const include = partialOpts.includeGlob || '**/*';
-    const excParts = ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/out/**'];
-    if (partialOpts.excludeGlob) { excParts.unshift(partialOpts.excludeGlob); }
-    const exclude = '{' + excParts.join(',') + '}';
+    const root = roots[0].uri.fsPath;
+    const opts: SearchOpts = { ...partialOpts };
 
-    const uris = await vscode.workspace.findFiles(include, exclude, 20000);
-    let filePaths = uris.map(u => u.fsPath);
-    if (targetFiles?.length) {
-      const set = new Set(targetFiles);
-      filePaths = filePaths.filter(fp => set.has(fp));
-    }
+    SearchPanel._send({ type: 'searching' });
 
-    const opts: SearchOpts = { ...partialOpts, root, filePaths };
-    const results = await runSearchWorker(opts);
+    // Collect all results first (need full set for replace)
+    const results = await runSearchCollect(opts, root);
 
     let pattern = partialOpts.query;
     if (!partialOpts.useRegex) { pattern = pattern.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&'); }
@@ -176,12 +180,17 @@ export class SearchPanel {
 
     const seenFiles = new Map<string, boolean>();
     results.forEach(r => seenFiles.set(r.filePath, true));
-    const affected = Array.from(seenFiles.keys());
-    const edit = new vscode.WorkspaceEdit();
 
+    let affected = Array.from(seenFiles.keys());
+    if (targetFiles?.length) {
+      const set = new Set(targetFiles);
+      affected = affected.filter(fp => set.has(fp));
+    }
+
+    const edit = new vscode.WorkspaceEdit();
     for (const fp of affected) {
       const uri = vscode.Uri.file(fp);
-      const doc  = await vscode.workspace.openTextDocument(uri);
+      const doc = await vscode.workspace.openTextDocument(uri);
       const text = doc.getText();
       regex.lastIndex = 0;
       const newText = text.replace(regex, replaceText);
