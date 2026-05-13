@@ -2,7 +2,7 @@
   "name": "vsisearch",
   "displayName": "VSI Search (IDEA Style)",
   "description": "IntelliJ IDEA style Find in Files / Replace in Files – three-pane layout, flat results, full-file preview, floating window.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "icon": "assets/icon.ico",
   "publisher": "wilkey",
   "author": { "name": "Wilkey", "email": "admin@wilkey.vip" },

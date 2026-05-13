@@ -78,7 +78,7 @@ input[type=text]:focus{border-color:var(--input-focus)}
 #results-pane{flex:0 0 55%;display:flex;flex-direction:column;min-height:60px;overflow:hidden}
 #splitter{height:4px;background:var(--sep);cursor:row-resize;flex-shrink:0}
 #splitter:hover{background:var(--input-focus)}
-#preview-pane{flex:1;display:flex;flex-direction:column;min-height:40px;overflow:hidden;border-top:1px solid var(--sep)}
+#preview-pane{flex:1;display:flex;flex-direction:column;min-height:40px;overflow:hidden;border-top:1px solid var(--sep);position:relative}
 
 
 #results-header{
@@ -122,9 +122,19 @@ input[type=text]:focus{border-color:var(--input-focus)}
   padding:2px 8px;font-size:11px;color:var(--dim);
   flex-shrink:0;min-height:22px;display:flex;align-items:center;
 }
-#preview-content{flex:1;overflow:auto;padding:0}
+#preview-content{flex:1;overflow:auto;padding:0;position:relative}
 #preview-content::-webkit-scrollbar{width:8px}
 #preview-content::-webkit-scrollbar-thumb{background:var(--sep);border-radius:4px}
+.sb-markers{
+  position:absolute;top:0;right:0;width:8px;height:100%;
+  pointer-events:none;z-index:2;
+}
+.sb-dot{
+  position:absolute;right:0;width:8px;height:3px;
+  background:var(--hl-bg);opacity:0.8;
+  pointer-events:auto;cursor:pointer;
+}
+.sb-dot:hover{opacity:1;height:5px;background:var(--hl-bg)}
 #preview-table{width:100%;border-collapse:collapse;font-size:12px}
 .pv-line{display:flex}
 .pv-lnum{
@@ -135,6 +145,7 @@ input[type=text]:focus{border-color:var(--input-focus)}
 .pv-code{padding:1px 0 1px 10px;white-space:pre;flex:1;
   font-family:var(--vscode-editor-font-family, "Consolas",monospace);}
 .pv-line.target{background:var(--preview-hl)}
+.pv-line.has-match{background:rgba(234,184,0,0.08)}
 
 
 #empty{
@@ -419,21 +430,64 @@ function showPreview(r) {
   }
 }
 
+function byteToChar(str, byteOff) {
+  if (byteOff <= 0) return 0;
+  let bytes = 0;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c >= 0xD800 && c <= 0xDBFF && i + 1 < str.length) {
+      bytes += 4; i++; // surrogate pair = 4 UTF-8 bytes
+    } else {
+      bytes += c > 0x7FF ? 3 : c > 0x7F ? 2 : 1;
+    }
+    if (bytes > byteOff) return i;
+  }
+  return str.length;
+}
+
 function renderFullFile(content, r) {
   const lines = content.split('\\n');
   const target = r.line; // 1-based
+  const totalLines = lines.length;
   const frag = document.createDocumentFragment();
+
+  // Collect all matches for this file: line -> [{col, colEnd}]
+  const matchMap = new Map();
+  for (let k = 0; k < results.length; k++) {
+    const m = results[k];
+    if (m.filePath !== r.filePath) continue;
+    let arr = matchMap.get(m.line);
+    if (!arr) { arr = []; matchMap.set(m.line, arr); }
+    arr.push({ col: m.col, colEnd: m.colEnd });
+  }
+
   for (let i = 0; i < lines.length; i++) {
     const lnum = i + 1;
     const div = document.createElement('div');
-    div.className = 'pv-line' + (lnum === target ? ' target' : '');
+    const isTarget = lnum === target;
+    div.className = 'pv-line' + (isTarget ? ' target' : '');
+    if (matchMap.has(lnum)) div.classList.add('has-match');
     div.dataset.ln = lnum;
     const text = lines[i].replace(/\\r$/, '');
+
     let codeHtml;
-    if (lnum === target) {
-      codeHtml = escHtml(text.substring(0, r.col))
-        + '<span class="hl">' + escHtml(text.substring(r.col, r.colEnd)) + '</span>'
-        + escHtml(text.substring(r.colEnd));
+    if (isTarget) {
+      // Use the clicked match's exact position
+      const col = byteToChar(text, r.col);
+      const colEnd = byteToChar(text, r.colEnd);
+      const safeEnd = Math.max(col + 1, colEnd);
+      codeHtml = escHtml(text.substring(0, col))
+        + '<span class="hl">' + escHtml(text.substring(col, safeEnd)) + '</span>'
+        + escHtml(text.substring(safeEnd));
+    } else if (matchMap.has(lnum)) {
+      // Highlight first match on this line
+      const m = matchMap.get(lnum)[0];
+      const col = byteToChar(text, m.col);
+      const colEnd = byteToChar(text, m.colEnd);
+      const safeEnd = Math.max(col + 1, colEnd);
+      codeHtml = escHtml(text.substring(0, col))
+        + '<span class="hl">' + escHtml(text.substring(col, safeEnd)) + '</span>'
+        + escHtml(text.substring(safeEnd));
     } else {
       codeHtml = escHtml(text);
     }
@@ -443,15 +497,39 @@ function renderFullFile(content, r) {
   }
   pvContent.innerHTML = '';
   pvContent.appendChild(frag);
-  // scroll target into center
-  const targetEl = pvContent.querySelector('.pv-line.target');
-  if (targetEl) {
-    const containerRect = pvContent.getBoundingClientRect();
-    const targetRect = targetEl.getBoundingClientRect();
-    const offset = targetRect.top - containerRect.top + pvContent.scrollTop
-                 - containerRect.height / 2 + targetRect.height / 2;
-    pvContent.scrollTop = Math.max(0, offset);
-  }
+
+  // Build scrollbar markers
+  updateScrollbarMarkers(matchMap, totalLines);
+
+  // scroll target into center after layout
+  requestAnimationFrame(() => {
+    const targetEl = pvContent.querySelector('.pv-line.target');
+    if (targetEl) {
+      targetEl.scrollIntoView({ block: 'center', behavior: 'instant' });
+    }
+  });
+}
+
+function updateScrollbarMarkers(matchMap, totalLines) {
+  // Remove old markers
+  const pane = pvContent.parentElement;
+  const old = pane.querySelector('.sb-markers');
+  if (old) old.remove();
+  if (!matchMap.size || totalLines < 2) return;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sb-markers';
+
+  matchMap.forEach((_, ln) => {
+    const pct = ((ln - 1) / (totalLines - 1)) * 100;
+    const dot = document.createElement('div');
+    dot.className = 'sb-dot';
+    dot.style.top = pct + '%';
+    dot.title = 'Line ' + ln;
+    overlay.appendChild(dot);
+  });
+
+  pane.appendChild(overlay);
 }
 
 function hlSnippet(text, start, end) {
